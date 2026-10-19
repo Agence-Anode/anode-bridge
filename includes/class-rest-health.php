@@ -57,6 +57,7 @@ final class Rest_Health {
 		'anode-builder'      => [ 'symbole' => 'Anode\Builder\fonctions_actives', 'genre' => 'function' ],
 		'anode-plan'         => [ 'symbole' => 'Anode\\Plan\\Plan', 'genre' => 'class' ],
 		'anode-animations'   => [ 'symbole' => 'Anode\\Animations\\Animations', 'genre' => 'class' ],
+		'anode-retours'      => [ 'symbole' => 'Anode\\Retours\\Retours', 'genre' => 'class' ],
 	];
 
 	/**
@@ -322,6 +323,8 @@ final class Rest_Health {
 
 			case 'anode-plan':
 				return $this->sondes_plan();
+			case 'anode-retours':
+				return $this->sondes_retours();
 		}
 
 		return [];
@@ -395,6 +398,89 @@ final class Rest_Health {
 					: 'servies en préproduction, comme attendu'
 			),
 		];
+	}
+
+	/**
+	 * Le mode de retours : la porte d'abord, la mise en service ensuite.
+	 *
+	 * Deux sondes, et la distinction entre elles est tout l'intérêt.
+	 *
+	 * La PORTE ne pardonne pas : un bouton « Faire un retour » servi en
+	 * production expose au public un relais d'envoi de courriel vers des boîtes
+	 * de l'agence. Le htpasswd d'une préproduction ne protège pas de cela — il
+	 * protège l'environnement, pas la route.
+	 *
+	 * La MISE EN SERVICE, elle, est facultative : tous les sites du parc n'ont
+	 * pas de relecture en cours. Elle rend donc « non mis en service » plutôt que
+	 * « au vert » — c'est le travers corrigé sur l'écran des mises à jour, qui
+	 * disait « à jour » de tout ce qu'il n'avait pas pu comparer.
+	 *
+	 * @return list<array{id: string, ok: bool, detail: string}>
+	 */
+	private function sondes_retours(): array {
+		/*
+		 * L'autorité est celle que le composant interroge lui-même. Une sonde qui
+		 * recopierait la détection d'environnement mesurerait sa propre copie —
+		 * et rendrait vert un site que le composant, lui, juge en production.
+		 */
+		$actif = is_callable( [ '\\Anode\\Retours\\Retours', 'actif' ] )
+			&& \Anode\Retours\Retours::actif();
+
+		$production = is_callable( [ '\\Anode\\Seo\\Seo', 'production_declared' ] )
+			? (bool) \Anode\Seo\Seo::production_declared()
+			: 'production' === wp_get_environment_type();
+
+		$configure = defined( 'ANODE_RETOURS_MDP' ) && '' !== trim( (string) ANODE_RETOURS_MDP );
+
+		$destinataires = is_callable( [ '\\Anode\\Retours\\Envoi', 'destinataires' ] )
+			? \Anode\Retours\Envoi::destinataires()
+			: [];
+
+		$sondes = [
+			$this->sonde(
+				'retours-porte',
+				$production ? ! $actif : true,
+				'le mode de retours est SERVI EN PRODUCTION : le bouton et la route d’envoi de courriel sont exposés au public',
+				$production
+					? 'muet en production, comme attendu'
+					: 'hors production : la porte laisse passer, comme attendu'
+			),
+		];
+
+		if ( $production ) {
+			return $sondes;
+		}
+
+		$sondes[] = $this->sonde(
+			'retours-service',
+			true,
+			'',
+			$configure
+				? sprintf(
+					'en service — %d destinataire(s), %s',
+					count( $destinataires ),
+					'' !== ( is_callable( [ '\\Anode\\Retours\\Envoi', 'relais' ] ) ? \Anode\Retours\Envoi::relais() : '' )
+						? 'envoi par relais'
+						: 'envoi par courriel du site'
+				)
+				: 'non mis en service : ANODE_RETOURS_MDP n’est pas définie, le composant est inerte (wp config set ANODE_RETOURS_MDP "…" --type=constant)'
+		);
+
+		/*
+		 * Configuré mais sans destinataire valable : les demandes du client
+		 * partiraient nulle part, et le navigateur afficherait une erreur au
+		 * moment précis où il vient d'écrire quinze retours. Rouge.
+		 */
+		if ( $configure ) {
+			$sondes[] = $this->sonde(
+				'retours-destinataires',
+				[] !== $destinataires,
+				'le mode de retours est en service et aucun destinataire n’est valable : chaque envoi sera refusé (ANODE_RETOURS_DESTINATAIRES, ou admin_email)',
+				sprintf( '%d destinataire(s) valable(s)', count( $destinataires ) )
+			);
+		}
+
+		return $sondes;
 	}
 
 	/**
@@ -1267,7 +1353,7 @@ final class Rest_Health {
 		 * Une route manquante ne se voit qu'au moment où un outil l'appelle, et
 		 * l'erreur dit « 404 » — pas « votre pont est à moitié enregistré ».
 		 */
-		$attendues = [ '/bricks/classes', '/bricks/components', '/bricks/custom-css', '/site', '/design-system' ];
+		$attendues = [ '/bricks/classes', '/bricks/components', '/bricks/custom-css', '/site', '/design-system', '/inspect' ];
 		$absentes  = [];
 
 		foreach ( $attendues as $route ) {
@@ -1292,7 +1378,42 @@ final class Rest_Health {
 			$this->sonde_extensions_tierces(),
 			$this->sonde_themes_superflus(),
 			$this->sonde_favicon(),
+			$this->sonde_inspection(),
 		];
+	}
+
+	/**
+	 * L'inspection est-elle restée ouverte ?
+	 *
+	 * Elle rend le site lisible intégralement — fichiers, options, tables. C'est
+	 * légitime le temps d'une reprise, et c'est une surface d'exposition tout le
+	 * reste du temps. Une capacité ouverte dont rien ne parle est une capacité
+	 * qu'on oublie : la sonde passe donc au rouge tant qu'elle l'est, et dit
+	 * jusqu'à quand.
+	 *
+	 * Elle expire d'elle-même ; cette sonde sert à ne pas attendre l'expiration
+	 * pour s'en souvenir.
+	 *
+	 * @return array{id: string, ok: bool, detail: string}
+	 */
+	private function sonde_inspection(): array {
+		$jusqu = Rest_Inspection::open_until();
+
+		if ( null === $jusqu ) {
+			return $this->sonde( 'inspection-fermee', true, '', 'inspection fermée — le site n’est pas lisible intégralement' );
+		}
+
+		return $this->sonde(
+			'inspection-fermee',
+			false,
+			sprintf(
+				'inspection OUVERTE jusqu’au %s : fichiers, options, métadonnées et tables sont lisibles par '
+					. 'le serveur MCP. À refermer dès la reprise terminée — Outils → Inspection Anode, '
+					. 'ou en retirant la constante ANODE_INSPECTION.',
+				$jusqu
+			),
+			''
+		);
 	}
 
 	/**

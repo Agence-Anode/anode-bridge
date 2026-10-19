@@ -27,11 +27,24 @@ final class Plugin {
 		Rest_Media::class,
 		Rest_Content::class,
 		Rest_Health::class,
+		Rest_Inspection::class,
 	];
 
 	public function register(): void {
 		add_action( 'rest_api_init', [ $this, 'register_routes' ] );
 		add_action( 'init', [ $this, 'expose_bricks_meta' ], 20 );
+
+		/*
+		 * L'écran d'ouverture de l'inspection ne se charge qu'en administration.
+		 *
+		 * Il est la seule façon d'ouvrir sur un site dont nous n'avons pas les
+		 * fichiers — et il exige une session interactive, ce qui est exactement
+		 * la propriété recherchée : un mot de passe d'application qui fuit
+		 * n'ouvre pas wp-admin, donc n'ouvre pas le livre.
+		 */
+		if ( is_admin() ) {
+			( new Admin_Inspection() )->register();
+		}
 	}
 
 	public function register_routes(): void {

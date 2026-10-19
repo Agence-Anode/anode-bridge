@@ -1288,6 +1288,80 @@ test( 'un bouton qui a un libellé le garde', function (): void {
 } );
 
 
+/* --- Le bornage des dimensions (§39, et l'accord des bornes) --------- */
+
+/** Écrit une classe par le validateur et rend ses réglages. */
+function reglages_apres( array $settings ): array {
+	$out = Validator::global_classes( [ [ 'name' => 'c-essai', 'settings' => $settings ] ] );
+	assert_true( is_array( $out ), 'la classe devait passer' );
+
+	return $out[0]['settings'];
+}
+
+test( 'une longueur littérale reçoit ses quatre bornes', function (): void {
+	$r = reglages_apres( [ '_width' => '40px', '_height' => '40px' ] );
+
+	foreach ( [ '_widthMin', '_widthMax', '_heightMin', '_heightMax' ] as $cle ) {
+		assert_true( '40px' === ( $r[ $cle ] ?? null ), "borne {$cle} absente" );
+	}
+} );
+
+test( 'un jeton est borné, avec son EXPRESSION et non une valeur résolue', function (): void {
+	// Le cas mesuré le 07/08/2026 : la bascule de thème portait
+	// `var(--control-h)`, que l'ancien motif laissait passer sans bornes.
+	$r = reglages_apres( [ '_width' => 'var(--control-h)', '_height' => 'var(--control-h)' ] );
+
+	assert_true( 'var(--control-h)' === ( $r['_widthMax'] ?? null ), 'le jeton n’est pas borné' );
+	assert_true( 'var(--control-h)' === ( $r['_heightMin'] ?? null ), 'le jeton n’est pas borné en hauteur' );
+} );
+
+test( 'une dimension fluide n’est jamais bornée', function (): void {
+	// Figer un pourcentage empêche l’élément de rétrécir : le conteneur
+	// déborde SUR LE FRONT, là où le visiteur le voit.
+	foreach ( [ '100%', 'auto', 'fit-content', 'max-content', '50vw', 'var(--x, 100%)', 'calc(var(--x) + 2px)' ] as $fluide ) {
+		$r = reglages_apres( [ '_width' => $fluide ] );
+		assert_true( ! isset( $r['_widthMin'] ), "« {$fluide} » a été borné à tort" );
+	}
+} );
+
+test( 'une borne déjà posée n’est pas écrasée', function (): void {
+	$r = reglages_apres( [ '_width' => '40px', '_widthMin' => '10px' ] );
+
+	assert_true( '10px' === $r['_widthMin'], 'le minimum choisi par l’auteur a été écrasé' );
+	assert_true( '40px' === $r['_widthMax'], 'le maximum manquant n’a pas été posé' );
+} );
+
+test( 'une borne écrite seule à un palier reçoit sa jumelle au même palier', function (): void {
+	/*
+	 * LE défaut du 07/08/2026, à l’octet près : `_heightMin:tablet_portrait`
+	 * posé seul, `_heightMax` restant à la valeur de base. En CSS le minimum
+	 * l’emporte sur le maximum — la boîte sortait en 34 × 44.
+	 */
+	$r = reglages_apres( [
+		'_width'                    => 'var(--control-h)',
+		'_height'                   => 'var(--control-h)',
+		'_heightMin:tablet_portrait' => '44px',
+	] );
+
+	assert_true( '44px' === ( $r['_heightMax:tablet_portrait'] ?? null ), 'la jumelle manque : min > max hérité' );
+} );
+
+test( 'une paire complète à un palier reste intacte', function (): void {
+	$r = reglages_apres( [
+		'_widthMin:mobile_portrait' => '20px',
+		'_widthMax:mobile_portrait' => '60px',
+	] );
+
+	assert_true( '20px' === $r['_widthMin:mobile_portrait'], 'le minimum a bougé' );
+	assert_true( '60px' === $r['_widthMax:mobile_portrait'], 'un intervalle voulu a été écrasé' );
+} );
+
+test( 'une borne seule au palier de BASE n’hérite de rien, donc reste seule', function (): void {
+	$r = reglages_apres( [ '_heightMin' => '44px' ] );
+
+	assert_true( ! isset( $r['_heightMax'] ), 'un plafond a été inventé là où rien ne le contredit' );
+} );
+
 echo "\n{$passed} test(s) réussi(s), {$failed} échec(s).\n";
 
 exit( $failed > 0 ? 1 : 0 );

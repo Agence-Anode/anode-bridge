@@ -155,7 +155,19 @@ final class Validator {
 		 * Sans `properties`, une instance afficherait les valeurs par défaut du
 		 * composant sur toutes les pages.
 		 */
-		foreach ( [ 'label', 'themeStyle', 'component', 'cid', 'instanceId', 'properties' ] as $optional ) {
+		/*
+		 * `global` désigne un élément global : Bricks le rend depuis sa
+		 * définition partagée, pas depuis la copie locale de la page — laquelle
+		 * est souvent périmée. Absent de cette liste, le champ était écarté à
+		 * l'écriture et l'élément retombait sur sa copie, affichant d'anciennes
+		 * valeurs sans la moindre erreur. Mesuré sur CPA : deux compteurs
+		 * passaient de « 40 » et « + 10 000 » à « 24 » et « 7,000 » au simple
+		 * aller-retour de lecture/écriture.
+		 *
+		 * `themeStyles` au pluriel est la forme que Bricks écrit ; `themeStyle`
+		 * figurait seul, et ne correspondait à rien.
+		 */
+		foreach ( [ 'label', 'global', 'themeStyle', 'themeStyles', 'component', 'cid', 'instanceId', 'properties' ] as $optional ) {
 			if ( isset( $element[ $optional ] ) && ( is_string( $element[ $optional ] ) || is_array( $element[ $optional ] ) ) ) {
 				$node[ $optional ] = $element[ $optional ];
 			}
@@ -952,6 +964,111 @@ final class Validator {
 	 * @param array<string, mixed> $settings Réglages de la classe.
 	 * @return array<string, mixed>
 	 */
+	/**
+	 * Une dimension se borne-t-elle ?
+	 *
+	 * Deux formes, et deux seulement :
+	 *
+	 * - une longueur littérale — `40px`, `2.5rem`, `1.2em` ;
+	 * - **un jeton** — `var(--taille-controle)`.
+	 *
+	 * **Le jeton a été ajouté le 07/08/2026.** Une classe qui déclare sa taille
+	 * par un jeton plutôt qu'en pixels décrit exactement la même chose, et le
+	 * motif limité aux longueurs littérales la laissait passer sans bornes. Le
+	 * défaut se voit alors dans le canevas seulement, comme tous ceux de cette
+	 * famille.
+	 *
+	 * **La borne reprend l'EXPRESSION, jamais une valeur résolue.** Un jeton peut
+	 * être redéfini selon la portée — la même variable valant deux tailles
+	 * différentes dans deux blocs. Résolue à l'écriture, la borne serait figée sur
+	 * l'une des deux ; écrite telle quelle, elle se résout dans la même cascade
+	 * que l'élément, donc toujours juste.
+	 *
+	 * **Ce qui reste exclu, et pourquoi.** `%` et les unités de fenêtre expriment
+	 * une taille qui suit son parent : un `min-` les empêcherait de rétrécir, et
+	 * le conteneur déborderait **sur le front**, là où le visiteur le voit.
+	 * `auto` et la famille `*-content` n'ont pas le même sens sur une borne que
+	 * sur une dimension — `max-width: auto` n'est même pas valide.
+	 *
+	 * @param string $valeur Valeur déclarée.
+	 */
+	private static function dimension_bornable( string $valeur ): bool {
+		$valeur = trim( $valeur );
+
+		if ( preg_match( '/^-?\d+(?:\.\d+)?(?:px|rem|em)$/', $valeur ) ) {
+			return true;
+		}
+
+		// Un jeton seul, sans repli ni calcul autour : `var(--x)` et rien d'autre.
+		// `var(--x, 100%)` porterait un repli fluide qu'on ne veut pas figer, et
+		// `calc(var(--x) + 2px)` n'est pas une taille unique déclarée.
+		return (bool) preg_match( '/^var\(\s*--[A-Za-z0-9_-]+\s*\)$/', $valeur );
+	}
+
+	/**
+	 * Une borne écrite seule à un palier réclame sa jumelle **au même palier**.
+	 *
+	 * **Le défaut, mesuré le 07/08/2026.** Un bouton carré sortait en 34 × 44 sous
+	 * le palier tablette. Sa classe portait un `_heightMin` à ce palier, posé par
+	 * une passe sur les cibles tactiles, pendant que le `_heightMax` restait à sa
+	 * valeur de base, plus petite. **En CSS le minimum l'emporte sur le maximum** :
+	 * la hauteur suit le minimum, la largeur ne bouge pas, et rien ne le signale —
+	 * ni erreur, ni avertissement, ni écart de hauteur de page.
+	 *
+	 * Borner est la règle ; elle ne disait pas que **les bornes doivent s'accorder
+	 * entre elles**. Une borne posée seule crée exactement le défaut qu'elle
+	 * prétend empêcher.
+	 *
+	 * **Ce que cette passe fait.** Là où un `Min` ou un `Max` est écrit à un palier
+	 * sans sa jumelle, elle écrit la jumelle **avec la même valeur**. Le résultat
+	 * est une taille exacte à ce palier — et non un intervalle dont une borne
+	 * viendrait d'ailleurs.
+	 *
+	 * Elle ne touche jamais une paire déjà complète : deux bornes écrites côte à
+	 * côte expriment une intention, et cette intention se respecte même si elle
+	 * décrit un intervalle.
+	 *
+	 * @param array<string, mixed> $settings Réglages.
+	 * @return array<string, mixed>
+	 */
+	private static function accorder_bornes( array $settings ): array {
+		$paires = [
+			'_widthMin'  => '_widthMax',
+			'_widthMax'  => '_widthMin',
+			'_heightMin' => '_heightMax',
+			'_heightMax' => '_heightMin',
+		];
+
+		foreach ( array_keys( $settings ) as $key ) {
+			if ( ! is_string( $key ) ) {
+				continue;
+			}
+
+			$parts   = explode( ':', $key, 2 );
+			$base    = $parts[0];
+			$rupture = $parts[1] ?? '';
+
+			// Le palier de base n'hérite de rien : une borne seule y est un choix.
+			if ( '' === $rupture || ! isset( $paires[ $base ] ) ) {
+				continue;
+			}
+
+			$jumelle = $paires[ $base ] . ':' . $rupture;
+
+			if ( array_key_exists( $jumelle, $settings ) ) {
+				continue;
+			}
+
+			$valeur = $settings[ $key ];
+
+			if ( is_string( $valeur ) && '' !== trim( $valeur ) ) {
+				$settings[ $jumelle ] = $valeur;
+			}
+		}
+
+		return $settings;
+	}
+
 	private static function borner_dimensions( array $settings ): array {
 		$bornes = [
 			'_width'  => [ '_widthMin', '_widthMax' ],
@@ -971,7 +1088,7 @@ final class Validator {
 				continue;
 			}
 
-			if ( ! preg_match( '/^-?\d+(?:\.\d+)?(?:px|rem|em)$/', trim( $value ) ) ) {
+			if ( ! self::dimension_bornable( $value ) ) {
 				continue;
 			}
 
@@ -984,7 +1101,7 @@ final class Validator {
 			}
 		}
 
-		return $settings;
+		return self::accorder_bornes( $settings );
 	}
 
 	public static function global_classes( mixed $classes, bool $strict_bem = true ): array|\WP_Error {
